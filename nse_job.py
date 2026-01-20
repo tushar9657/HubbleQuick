@@ -18,30 +18,21 @@ try:
 except Exception:
     IST = None
 
-
 # -----------------------------
-# Automation Settings
+# Settings
 # -----------------------------
 RSS_URL = "https://nsearchives.nseindia.com/content/RSS/Online_announcements.xml"
-
-# Fetch at 23:59 IST, process at 00:10 IST
-FETCH_AT_IST  = dtime(23, 59)
-PROCESS_AT_IST = dtime(0, 1)
 
 # Workdir inside GitHub workspace (override via WORKDIR env var if needed)
 _DEFAULT_WORKDIR = Path(os.environ.get("GITHUB_WORKSPACE", ".")) / "nse_daily_runs"
 WORKDIR = Path(os.environ.get("WORKDIR", str(_DEFAULT_WORKDIR)))
 WORKDIR.mkdir(parents=True, exist_ok=True)
 
-# How many times to retry fetching RSS around the fetch window
 RSS_FETCH_MAX_RETRIES = 8
 RSS_FETCH_TIMEOUT = (6, 30)  # (connect, read)
 
-
-# -----------------------------
-# Pipeline Settings (balanced)
-# -----------------------------
-CLUSTER_SECONDS = 1
+# Pipeline Settings
+CLUSTER_SECONDS = 60  # keep original intent; 1 sec is too strict/noisy
 
 EXISTS_BATCH_SIZE = 25
 EXISTS_MAX_WORKERS = 6
@@ -76,13 +67,7 @@ CONTENT_CAP = 100_000
 NSE_HOME = "https://www.nseindia.com/"
 NSE_REFERER = "https://www.nseindia.com/companies-listing/corporate-filings-announcements"
 
-# If a run starts far outside the expected window, don't sleep for hours.
-# If sleep needed is > MAX_WAIT_SECONDS, run immediately.
-MAX_WAIT_SECONDS = int(os.environ.get("MAX_WAIT_SECONDS", "10800"))  # 3 hours
-
-# OCR availability
 OCR_ENABLED = shutil.which("tesseract") is not None
-
 
 # -----------------------------
 # Time helpers (IST)
@@ -90,36 +75,17 @@ OCR_ENABLED = shutil.which("tesseract") is not None
 def now_ist() -> datetime:
     if IST is not None:
         return datetime.now(IST).replace(tzinfo=None)
-    # fixed offset fallback (GMT+5:30)
     return (datetime.utcnow() + timedelta(hours=5, minutes=30)).replace(tzinfo=None)
 
-def sleep_until(dt_ist: datetime):
-    while True:
-        n = now_ist()
-        delta = (dt_ist - n).total_seconds()
-        if delta <= 0:
-            return
-        time.sleep(min(30.0, max(0.25, delta / 4.0)))
-
-def compute_cycle_datetimes(now: datetime) -> tuple[datetime, datetime]:
+def run_label_date_ist() -> str:
     """
-    Determine the (fetch_dt, process_dt) for the *current* run window.
-
-    If now is after midnight but before PROCESS_AT_IST (e.g., 00:05),
-    then process_dt is today at PROCESS_AT_IST and fetch_dt is yesterday at FETCH_AT_IST.
-
-    Otherwise (typical scheduled start ~23:57), process_dt is tomorrow at PROCESS_AT_IST
-    and fetch_dt is today at FETCH_AT_IST.
+    Label outputs by IST date. If GitHub starts a few minutes late (after midnight IST),
+    label as previous day to match the intended 23:59 IST run.
     """
-    if now.time() <= PROCESS_AT_IST:
-        process_date = now.date()
-    else:
-        process_date = (now + timedelta(days=1)).date()
-
-    process_dt = datetime.combine(process_date, PROCESS_AT_IST)
-    fetch_dt = datetime.combine(process_date - timedelta(days=1), FETCH_AT_IST)
-    return fetch_dt, process_dt
-
+    n = now_ist()
+    if n.time() < dtime(0, 30):  # small jitter window
+        n = n - timedelta(days=1)
+    return n.date().isoformat()
 
 # -----------------------------
 # Thread-local HTTP session
@@ -169,7 +135,6 @@ def ensure_nse_warmup(s: requests.Session):
         pass
     _tls.nse_warmed = True
 
-
 # -----------------------------
 # URL helpers
 # -----------------------------
@@ -187,7 +152,6 @@ def is_xml_url(url: str) -> bool:
     u = (url or "").lower()
     return url_suffix(url) == ".xml" or "/xbrl/" in u
 
-
 # -----------------------------
 # Exists check (HEAD → Range GET → probe GET)
 # -----------------------------
@@ -204,7 +168,6 @@ def exists_check(url: str) -> bool:
     not_found = {404, 410}
 
     for attempt in range(1, MAX_RETRIES + 1):
-        # HEAD
         try:
             r = s.head(url, allow_redirects=True, timeout=EXISTS_TIMEOUT)
             status = r.status_code
@@ -218,7 +181,6 @@ def exists_check(url: str) -> bool:
         except Exception:
             pass
 
-        # Range GET
         try:
             r = s.get(
                 url,
@@ -240,7 +202,6 @@ def exists_check(url: str) -> bool:
         except Exception:
             pass
 
-        # Probe GET
         try:
             r = s.get(url, stream=True, allow_redirects=True, timeout=EXISTS_TIMEOUT)
             status = r.status_code
@@ -259,7 +220,6 @@ def exists_check(url: str) -> bool:
             backoff(attempt)
 
     return True  # optimistic
-
 
 # -----------------------------
 # Fetch bytes
@@ -289,7 +249,6 @@ def fetch_bytes(url: str) -> tuple[bool, bytes]:
             backoff(attempt)
     return False, b""
 
-
 # -----------------------------
 # RSS fetch
 # -----------------------------
@@ -315,7 +274,6 @@ def fetch_rss_xml() -> str:
             base = min(15.0, 0.8 * (2 ** (attempt - 1)))
             time.sleep(base * (1.0 + random.random() * 0.25))
     raise RuntimeError(f"RSS fetch failed after retries: {last_err}")
-
 
 # -----------------------------
 # RSS pubDate parsing
@@ -343,7 +301,6 @@ def split_desc_subject(desc: str) -> tuple[str, str]:
         d, s = desc.split("|SUBJECT:", 1)
         return d.strip(), s.strip()
     return desc.strip(), ""
-
 
 # -----------------------------
 # RSS parsing (ElementTree → regex fallback)
@@ -427,7 +384,6 @@ def parse_rss_items(xml_text: str) -> list[dict]:
 
     return out
 
-
 # -----------------------------
 # Dedup by Title + time clustering (prefer XML in cluster)
 # -----------------------------
@@ -440,7 +396,7 @@ def dedup_by_title_time(rows: list[dict]) -> list[dict]:
         by_title[r.get("Title", "")].append(r)
 
     final = []
-    for title, group in by_title.items():
+    for _, group in by_title.items():
         group.sort(key=lambda x: dt_sort_key(x.get("pub_dt")))
 
         cluster = [group[0]]
@@ -469,7 +425,6 @@ def dedup_by_title_time(rows: list[dict]) -> list[dict]:
 
     return final
 
-
 # -----------------------------
 # Dedup by Link (keep newest PubDate; tie-break prefer XML)
 # -----------------------------
@@ -495,11 +450,8 @@ def dedup_by_link_keep_newest(rows: list[dict]) -> list[dict]:
 
     return list(best.values())
 
-
 # -----------------------------
 # Dedup by identical extracted Content (keep earliest pub_dt)
-# - Only applies when Content is non-empty
-# - Preserves original order
 # -----------------------------
 def dedup_by_content_keep_earliest_pubdt(rows: list[dict], results: dict) -> list[dict]:
     best_by_content = {}  # content -> (dt_or_max, link)
@@ -529,7 +481,6 @@ def dedup_by_content_keep_earliest_pubdt(rows: list[dict], results: dict) -> lis
         keep_links.add(link)
 
     return [r for r in rows if r.get("Link", "") in keep_links]
-
 
 # -----------------------------
 # Shared text normalization
@@ -565,7 +516,6 @@ def normalize_single_cell(text: str, *, tableish: bool) -> str:
     if len(compact) > CONTENT_CAP:
         compact = compact[:CONTENT_CAP] + "...[TRUNCATED]"
     return compact
-
 
 # -----------------------------
 # XML decode + strict trim (XBRL)
@@ -683,7 +633,6 @@ def detect_doc_type(url: str, b: bytes) -> str:
     if head.startswith(b"<?xml") or head.lower().startswith(b"<xbrl") or head.startswith(b"<"):
         return "xml"
     return "other"
-
 
 # -----------------------------
 # PDF extraction rules
@@ -827,7 +776,6 @@ def extract_pdf_span_ocr(pdf_bytes: bytes, max_pages: int, scale: float, tessera
     finally:
         doc.close()
 
-
 # -----------------------------
 # Per-row processing
 # -----------------------------
@@ -898,9 +846,8 @@ def chunked(seq: list, size: int):
     for i in range(0, len(seq), size):
         yield seq[i:i + size]
 
-
 # -----------------------------
-# One full run (takes RSS XML text)
+# One run: RSS text -> output CSV
 # -----------------------------
 def run_pipeline_from_rss_text(rss_text: str, out_csv_path: Path):
     m = re.search(r"<rss\b", rss_text, re.IGNORECASE)
@@ -916,7 +863,6 @@ def run_pipeline_from_rss_text(rss_text: str, out_csv_path: Path):
     unique_links = sorted({r["Link"] for r in dedup_title if r.get("Link")})
     print("Unique links (precheck set):", len(unique_links))
 
-    # Exists precheck
     exists_map = {}
     total = len(unique_links)
     checked = 0
@@ -946,7 +892,6 @@ def run_pipeline_from_rss_text(rss_text: str, out_csv_path: Path):
     to_process.sort(key=lambda x: x.get("Link", ""))
     print("Unique Exists=TRUE links to process:", len(to_process), f"(workers={PROCESS_MAX_WORKERS})")
 
-    # Phase 1: extraction
     results = {}
     pdf_cache = {}
     print("Phase 1: extraction (MuPDF + gated OCR; strict XBRL trim) ...")
@@ -969,7 +914,6 @@ def run_pipeline_from_rss_text(rss_text: str, out_csv_path: Path):
             if done % 25 == 0:
                 print(f"  processed {done}/{len(to_process)}")
 
-    # Phase 2: retry Not Extracted XML links
     xml_retry_targets = [link for link, (st, _) in results.items() if st == "Not Extracted" and is_xml_url(link)]
     print(f"Phase 2: Not Extracted XML links to retry: {len(xml_retry_targets)}")
 
@@ -990,7 +934,6 @@ def run_pipeline_from_rss_text(rss_text: str, out_csv_path: Path):
                 if done % 25 == 0:
                     print(f"  xml retried {done}/{len(xml_retry_targets)}")
 
-    # Phase 3: retry Not Extracted PDFs
     retry_targets = [link for link, (st, _) in results.items() if st == "Not Extracted" and link in pdf_cache]
     print(f"Phase 3: Not Extracted PDFs to retry: {len(retry_targets)}")
 
@@ -1031,12 +974,10 @@ def run_pipeline_from_rss_text(rss_text: str, out_csv_path: Path):
             if done % 25 == 0:
                 print(f"  ocr retried {done}/{len(remaining)}")
 
-    # Phase 4: de-duplicate by identical Content (keep earliest pub_dt)
     to_write = dedup_by_content_keep_earliest_pubdt(to_process, results)
     removed = len(to_process) - len(to_write)
     print(f"Phase 4: Content dedup: {len(to_process)} -> {len(to_write)} (removed {removed})")
 
-    # Write CSV
     out_csv_path.parent.mkdir(parents=True, exist_ok=True)
     with open(out_csv_path, "w", newline="", encoding="utf-8") as f:
         w = csv.writer(f)
@@ -1069,65 +1010,20 @@ def run_pipeline_from_rss_text(rss_text: str, out_csv_path: Path):
     print("Not Extracted:", sum(1 for v in vals if v == "Not Extracted"))
     print("CSV path:", str(out_csv_path))
 
-
 def main():
-    n = now_ist()
-    fetch_dt, process_dt = compute_cycle_datetimes(n)
-
     print("WORKDIR:", str(WORKDIR))
-    print("Now (IST):", n.strftime("%Y-%m-%d %H:%M:%S"))
-    print("Scheduled fetch_dt  :", fetch_dt.strftime("%Y-%m-%d %H:%M:%S"))
-    print("Scheduled process_dt:", process_dt.strftime("%Y-%m-%d %H:%M:%S"))
+    print("Now (IST):", now_ist().strftime("%Y-%m-%d %H:%M:%S"))
     print("OCR enabled:", OCR_ENABLED)
 
-    # If we're far outside expected window, avoid sleeping for hours.
-    if n < fetch_dt:
-        wait_s = (fetch_dt - n).total_seconds()
-        if wait_s > MAX_WAIT_SECONDS:
-            print(f"Fetch wait {int(wait_s)}s exceeds MAX_WAIT_SECONDS={MAX_WAIT_SECONDS}; running immediately.")
-        else:
-            print(f"Sleeping until fetch_dt ({int(wait_s)}s)...")
-            sleep_until(fetch_dt)
+    label_day = run_label_date_ist()
 
-    # Fetch RSS (save snapshot)
-    rss_text = None
-    fetch_day = fetch_dt.date().isoformat()
-    rss_path = WORKDIR / f"rss_{fetch_day}.xml"
-    try:
-        rss_text = fetch_rss_xml()
-        rss_path.write_text(rss_text, encoding="utf-8", errors="replace")
-        print(f"[{now_ist().strftime('%Y-%m-%d %H:%M:%S')}] RSS fetched and saved:", str(rss_path))
-    except Exception as e:
-        print(f"[{now_ist().strftime('%Y-%m-%d %H:%M:%S')}] RSS fetch FAILED:", repr(e))
+    rss_text = fetch_rss_xml()
+    rss_path = WORKDIR / f"rss_{label_day}.xml"
+    rss_path.write_text(rss_text, encoding="utf-8", errors="replace")
+    print("RSS fetched and saved:", str(rss_path))
 
-    # Wait until process time if reasonable
-    n2 = now_ist()
-    if n2 < process_dt:
-        wait_s = (process_dt - n2).total_seconds()
-        if wait_s > MAX_WAIT_SECONDS:
-            print(f"Process wait {int(wait_s)}s exceeds MAX_WAIT_SECONDS={MAX_WAIT_SECONDS}; processing immediately.")
-        else:
-            print(f"Sleeping until process_dt ({int(wait_s)}s)...")
-            sleep_until(process_dt)
-
-    # If RSS was not fetched earlier, attempt one last fetch at process time
-    if rss_text is None:
-        try:
-            rss_text = fetch_rss_xml()
-            process_day = now_ist().date().isoformat()
-            rss_path2 = WORKDIR / f"rss_{process_day}_late.xml"
-            rss_path2.write_text(rss_text, encoding="utf-8", errors="replace")
-            print(f"[{now_ist().strftime('%Y-%m-%d %H:%M:%S')}] RSS fetched (late) and saved:", str(rss_path2))
-        except Exception as e:
-            print(f"[{now_ist().strftime('%Y-%m-%d %H:%M:%S')}] Late RSS fetch FAILED:", repr(e))
-            raise SystemExit(2)
-
-    # Run pipeline and output daily CSV (date = process date)
-    process_day = now_ist().date().isoformat()
-    out_csv = WORKDIR / f"nse_filings_{process_day}.csv"
-    print(f"[{now_ist().strftime('%Y-%m-%d %H:%M:%S')}] Starting processing for date:", process_day)
+    out_csv = WORKDIR / f"nse_filings_{label_day}.csv"
     run_pipeline_from_rss_text(rss_text, out_csv)
-
 
 if __name__ == "__main__":
     main()
