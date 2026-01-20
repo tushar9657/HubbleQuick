@@ -2,8 +2,8 @@ name: NSE Corporate Filings (Daily)
 
 on:
   schedule:
-    # 23:57 IST = 18:27 UTC (IST has no DST)
-    - cron: "27 18 * * *"
+    # 23:59 IST = 18:29 UTC (IST has no DST)
+    - cron: "28 18 * * *"
   workflow_dispatch: {}
 
 concurrency:
@@ -34,14 +34,13 @@ jobs:
           python -m pip install --upgrade pip
           pip install requests pymupdf pytesseract pillow
 
-      - name: Run NSE job
+      - name: Run NSE job (fetch RSS + process + write outputs)
         env:
-          # Optional: prevent waiting for hours if manually triggered midday
-          MAX_WAIT_SECONDS: "10800"
+          PYTHONUNBUFFERED: "1"
         run: |
           python nse_job.py
 
-      - name: Upload CSV artifact
+      - name: Upload outputs as artifact
         uses: actions/upload-artifact@v4
         with:
           name: nse-filings
