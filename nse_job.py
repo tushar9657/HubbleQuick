@@ -25,8 +25,8 @@ except Exception:
 RSS_URL = "https://nsearchives.nseindia.com/content/RSS/Online_announcements.xml"
 
 # Fetch at 23:59 IST, process at 00:10 IST
-FETCH_AT_IST  = dtime(10, 4)
-PROCESS_AT_IST = dtime(10, 5)
+FETCH_AT_IST  = dtime(23, 59)
+PROCESS_AT_IST = dtime(0, 1)
 
 # Workdir inside GitHub workspace (override via WORKDIR env var if needed)
 _DEFAULT_WORKDIR = Path(os.environ.get("GITHUB_WORKSPACE", ".")) / "nse_daily_runs"
